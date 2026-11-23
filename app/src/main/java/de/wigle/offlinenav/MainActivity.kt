@@ -17,6 +17,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.core.content.IntentCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -107,18 +109,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val importState = MutableStateFlow(ImportState())
 
-    fun import(uri: Uri) {
-        if (importJob?.isActive == true) return
+    val selectedTab = MutableStateFlow(0)
+
+    fun import(uri: Uri) = importAll(listOf(uri))
+
+    fun importAll(uris: List<Uri>) {
+        if (uris.isEmpty() || importJob?.isActive == true) return
         importJob = viewModelScope.launch {
             importState.value = ImportState(running = true)
-            val msg = try {
-                val r = importer.import(uri) { n -> importState.value = importState.value.copy(progress = n) }
-                "Importiert: ${r.imported} · übersprungen: ${r.skippedNonWifi} kein WLAN, " +
-                    "${r.skippedInvalid} ungültig · Zeilen: ${r.linesRead}"
-            } catch (e: Exception) {
-                "Fehler: ${e.message}"
+            val msgs = uris.mapIndexed { i, uri ->
+                val prefix = if (uris.size > 1) "Datei ${i + 1}/${uris.size}: " else ""
+                try {
+                    val r = importer.import(uri) { n -> importState.value = importState.value.copy(progress = n) }
+                    prefix + "Importiert: ${r.imported} · übersprungen: ${r.skippedNonWifi} kein WLAN, " +
+                        "${r.skippedInvalid} ungültig · Zeilen: ${r.linesRead}"
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    prefix + "Fehler: ${e.message}"
+                }
             }
-            importState.value = ImportState(running = false, result = msg)
+            importState.value = ImportState(running = false, result = msgs.joinToString("\n"))
         }
     }
 
@@ -167,9 +178,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 // ───────────────────────────── Activity ─────────────────────────────
 
 class MainActivity : ComponentActivity() {
+    private val vm: MainViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null) handleIncomingFile(intent)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(
@@ -177,10 +191,45 @@ class MainActivity : ComponentActivity() {
                 else lightColorScheme(primary = Color(0xFF1B5E20))
             ) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot()
+                    AppRoot(vm)
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingFile(intent)
+    }
+
+    /** WiGLE-Export (CSV / CSV.GZ) über „Teilen“ oder „Öffnen mit“ empfangen. */
+    private fun handleIncomingFile(intent: Intent?) {
+        intent ?: return
+        val uris: List<Uri> = when (intent.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            Intent.ACTION_SEND -> listOfNotNull(
+                IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?.filterNotNull()
+                    ?: intent.clipData?.let { c -> (0 until c.itemCount).mapNotNull { c.getItemAt(it).uri } }
+                    ?: emptyList()
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) {
+            if (intent.action == Intent.ACTION_SEND) {
+                Toast.makeText(this, "Keine Datei im geteilten Inhalt gefunden", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        vm.selectedTab.value = 0
+        vm.importAll(uris)
+        Toast.makeText(this, "WiGLE-Import gestartet (${uris.size} Datei${if (uris.size > 1) "en" else ""})", Toast.LENGTH_SHORT).show()
+        // Intent verbrauchen, damit z. B. eine Rotation nicht erneut importiert
+        intent.action = Intent.ACTION_MAIN
     }
 }
 
@@ -197,11 +246,20 @@ private const val ADB_CMD = "adb shell settings put global wifi_scan_throttle_en
 
 @Composable
 fun AppRoot(vm: MainViewModel = viewModel()) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val tab by vm.selectedTab.collectAsState()
+    val imp by vm.importState.collectAsState()
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
         TabRow(selectedTabIndex = tab) {
-            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Navigation") })
-            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("WiGLE-Download") })
+            Tab(selected = tab == 0, onClick = { vm.selectedTab.value = 0 }, text = { Text("Navigation") })
+            Tab(selected = tab == 1, onClick = { vm.selectedTab.value = 1 }, text = { Text("WiGLE-Download") })
+        }
+        if (imp.running) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(
+                "CSV-Import läuft … %,d Access Points".format(imp.progress),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
         }
         when (tab) {
             0 -> MainScreen(vm)
