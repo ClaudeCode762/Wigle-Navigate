@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- WLAN-Bögen -->
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M30,50 A34,34 0 0 1 78,50" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M39,59 A21,21 0 0 1 69,59" />
+    <!-- Pin -->
+    <path android:fillColor="#FFEB3B"
+        android:pathData="M54,60 C47,60 43,65 43,70 C43,78 54,88 54,88 C54,88 65,78 65,70 C65,65 61,60 54,60 Z" />
+    <path android:fillColor="#1B5E20" android:pathData="M54,66 a4,4 0 1 0 0.01,0 Z" />
+</vector>
