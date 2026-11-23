@@ -41,6 +41,14 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,6 +85,12 @@ import java.util.Locale
 
 // ───────────────────────────── ViewModel ─────────────────────────────
 
+data class DownloadUiState(
+    val running: Boolean = false,
+    val progress: DownloadProgress? = null,
+    val result: String? = null,
+)
+
 data class ImportState(
     val running: Boolean = false,
     val progress: Long = 0,
@@ -110,6 +124,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelImport() { importJob?.cancel() }
 
+    // ── WiGLE API Download ──
+    val creds = WigleCredentialsStore(app)
+    private val api = WigleApiClient(app)
+    private var downloadJob: Job? = null
+    val downloadState = MutableStateFlow(DownloadUiState())
+
+    fun download(name: String, token: String, box: BoundingBox, maxPages: Int) {
+        if (downloadJob?.isActive == true) return
+        creds.apiName = name
+        creds.apiToken = token
+        downloadJob = viewModelScope.launch {
+            downloadState.value = DownloadUiState(running = true)
+            val msg = try {
+                val r = api.download(name, token, box, maxPages) { p ->
+                    downloadState.value = downloadState.value.copy(progress = p)
+                }
+                buildString {
+                    append("Fertig: ${r.stored} APs gespeichert (${r.received} empfangen, ${r.pages} Seiten)")
+                    r.total?.let { append(" · gesamt in Box: $it") }
+                    if (!r.complete) append(" · Seitenlimit erreicht – erneut starten oder Box verkleinern")
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                "Abgebrochen (bereits geladene Seiten sind gespeichert)"
+            } catch (e: Exception) {
+                "Fehler: ${e.message}"
+            }
+            downloadState.value = downloadState.value.copy(running = false, result = msg)
+        }
+    }
+
+    fun cancelDownload() { downloadJob?.cancel() }
+
     fun clearDatabase() {
         viewModelScope.launch {
             dao.clear()
@@ -131,7 +177,7 @@ class MainActivity : ComponentActivity() {
                 else lightColorScheme(primary = Color(0xFF1B5E20))
             ) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    MainScreen()
+                    AppRoot()
                 }
             }
         }
@@ -148,6 +194,163 @@ private fun requiredPermissions(): Array<String> = buildList {
 }.toTypedArray()
 
 private const val ADB_CMD = "adb shell settings put global wifi_scan_throttle_enabled 0"
+
+@Composable
+fun AppRoot(vm: MainViewModel = viewModel()) {
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+        TabRow(selectedTabIndex = tab) {
+            Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Navigation") })
+            Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("WiGLE-Download") })
+        }
+        when (tab) {
+            0 -> MainScreen(vm)
+            else -> WigleDownloadScreen(vm)
+        }
+    }
+}
+
+@Composable
+fun WigleDownloadScreen(vm: MainViewModel) {
+    val dl by vm.downloadState.collectAsState()
+    val apCount by vm.apCount.collectAsStateWithLifecycle()
+    val nav by WifiNavService.state.collectAsStateWithLifecycle()
+
+    var name by rememberSaveable { mutableStateOf(vm.creds.apiName) }
+    var token by rememberSaveable { mutableStateOf(vm.creds.apiToken) }
+    var showToken by rememberSaveable { mutableStateOf(false) }
+    val saved = remember { vm.creds.bbox }
+    var minLat by rememberSaveable { mutableStateOf(saved[0]) }
+    var maxLat by rememberSaveable { mutableStateOf(saved[1]) }
+    var minLon by rememberSaveable { mutableStateOf(saved[2]) }
+    var maxLon by rememberSaveable { mutableStateOf(saved[3]) }
+    var maxPages by rememberSaveable { mutableStateOf("50") }
+    var radiusKm by rememberSaveable { mutableStateOf("1") }
+
+    fun parse(v: String) = v.trim().replace(',', '.').toDoubleOrNull()
+    val box = run {
+        val a = parse(minLat); val b = parse(maxLat); val c = parse(minLon); val d = parse(maxLon)
+        if (a != null && b != null && c != null && d != null) BoundingBox(a, b, c, d) else null
+    }
+    val boxError = if (box == null) "Alle vier Koordinaten angeben" else box.validate()
+    val pages = maxPages.trim().toIntOrNull()?.coerceIn(1, 10_000)
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Spacer(Modifier.height(8.dp))
+            SectionCard("WiGLE API-Zugang") {
+                Text(
+                    "API Name & Token unter wigle.net → Account → „Show my token“ (Encoded for use ist NICHT nötig).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it },
+                    label = { Text("API Name") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = token, onValueChange = { token = it },
+                    label = { Text("API Token") }, singleLine = true,
+                    visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        TextButton(onClick = { showToken = !showToken }) { Text(if (showToken) "Verbergen" else "Zeigen") }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("Wird nur lokal auf dem Gerät gespeichert.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        item {
+            SectionCard("Bounding Box") {
+                val num = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(minLat, { minLat = it }, Modifier.weight(1f), label = { Text("Min Lat") }, singleLine = true, keyboardOptions = num)
+                    OutlinedTextField(maxLat, { maxLat = it }, Modifier.weight(1f), label = { Text("Max Lat") }, singleLine = true, keyboardOptions = num)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(minLon, { minLon = it }, Modifier.weight(1f), label = { Text("Min Lon") }, singleLine = true, keyboardOptions = num)
+                    OutlinedTextField(maxLon, { maxLon = it }, Modifier.weight(1f), label = { Text("Max Lon") }, singleLine = true, keyboardOptions = num)
+                }
+                boxError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                box?.takeIf { boxError == null }?.let { b ->
+                    val h = LocationCalculator.haversine(b.minLat, b.minLon, b.maxLat, b.minLon) / 1000
+                    val w = LocationCalculator.haversine(b.minLat, b.minLon, b.minLat, b.maxLon) / 1000
+                    Text(String.format(Locale.ROOT, "Fläche ca. %.2f × %.2f km", w, h), style = MaterialTheme.typography.bodySmall)
+                }
+                nav.estimate?.let { est ->
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            radiusKm, { radiusKm = it }, Modifier.width(110.dp),
+                            label = { Text("± km") }, singleLine = true, keyboardOptions = num,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = {
+                            val r = parse(radiusKm) ?: 1.0
+                            val dLat = r / 111.32
+                            val dLon = r / (111.32 * kotlin.math.cos(Math.toRadians(est.latitude))).coerceAtLeast(0.01)
+                            fun f(d: Double) = String.format(Locale.ROOT, "%.6f", d)
+                            minLat = f(est.latitude - dLat); maxLat = f(est.latitude + dLat)
+                            minLon = f(est.longitude - dLon); maxLon = f(est.longitude + dLon)
+                        }) { Text("Um aktuelle Position") }
+                    }
+                }
+                OutlinedTextField(
+                    maxPages, { maxPages = it }, Modifier.fillMaxWidth(),
+                    label = { Text("Max. Seiten (à ${WigleApiClient.RESULTS_PER_PAGE} Netze)") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Text(
+                    "Jede Seite zählt gegen das tägliche WiGLE-API-Kontingent.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        item {
+            SectionCard("Download") {
+                StatRow("APs in lokaler DB", "%,d".format(apCount))
+                Spacer(Modifier.height(8.dp))
+                if (dl.running) {
+                    val p = dl.progress
+                    val total = p?.total
+                    if (total != null && total > 0) {
+                        LinearProgressIndicator(
+                            progress = { (p.received.toFloat() / total).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(
+                        if (p == null) "Verbinde mit api.wigle.net …"
+                        else "Seite ${p.page} · ${p.received}" + (total?.let { " / $it" } ?: "") + " Netze",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(onClick = vm::cancelDownload) { Text("Abbrechen") }
+                } else {
+                    Button(
+                        onClick = {
+                            vm.creds.bbox = listOf(minLat, maxLat, minLon, maxLon)
+                            vm.download(name, token, box!!, pages!!)
+                        },
+                        enabled = name.isNotBlank() && token.isNotBlank() && boxError == null && pages != null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Netzwerke herunterladen") }
+                }
+                dl.result?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                Text(
+                    "Benötigt einmalig Internet. Die Navigation selbst bleibt komplett offline.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
 
 @Composable
 fun MainScreen(vm: MainViewModel = viewModel()) {
@@ -178,7 +381,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
