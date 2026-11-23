@@ -135,6 +135,12 @@ class WifiNavService : Service() {
         scope.launch { scanLoop() }
         scope.launch { processLoop() }
         scope.launch { republishLoop() }
+        scope.launch {
+            _manual.collect { m ->
+                m?.let { publish(it.latitude, it.longitude, it.accuracyMeters) }
+                updateNotification()
+            }
+        }
         return START_STICKY
     }
 
@@ -192,7 +198,7 @@ class WifiNavService : Service() {
                 else if (estimate == null) "Kein bekannter Access Point in Reichweite" else null,
             )
         }
-        estimate?.let { publish(it) }
+        if (_manual.value == null) estimate?.let { publish(it.latitude, it.longitude, it.accuracyMeters) }
         updateNotification()
     }
 
@@ -203,14 +209,22 @@ class WifiNavService : Service() {
     private suspend fun republishLoop() {
         while (scope.isActive) {
             delay(1_000)
+            val m = _manual.value
+            if (m != null) {
+                publish(m.latitude, m.longitude, m.accuracyMeters)
+                continue
+            }
             val s = _state.value
             val est = s.estimate ?: continue
-            if (System.currentTimeMillis() - s.estimateAt <= MAX_REPUBLISH_AGE_MS) publish(est)
+            if (System.currentTimeMillis() - s.estimateAt <= MAX_REPUBLISH_AGE_MS) {
+                publish(est.latitude, est.longitude, est.accuracyMeters)
+            }
         }
     }
 
-    private fun publish(est: PositionEstimate) {
-        val err = mock.push(est.latitude, est.longitude, est.accuracyMeters)
+    @Synchronized
+    private fun publish(lat: Double, lon: Double, accuracy: Float) {
+        val err = mock.push(lat, lon, accuracy)
         if (err != _state.value.mockError) {
             _state.update { it.copy(mockError = err, mockActive = err == null) }
         }
@@ -218,7 +232,10 @@ class WifiNavService : Service() {
 
     private fun updateNotification() {
         val s = _state.value
-        val text = s.estimate?.let {
+        val m = _manual.value
+        val text = if (m != null) String.format(
+            Locale.ROOT, "TEST-STANDORT %.6f, %.6f ±%.0f m", m.latitude, m.longitude, m.accuracyMeters
+        ) else s.estimate?.let {
             String.format(Locale.ROOT, "%.6f, %.6f ±%.0f m · %d/%d bekannt",
                 it.latitude, it.longitude, it.accuracyMeters, s.knownNetworks, s.visibleNetworks)
         } ?: "Suche bekannte WLANs … (${s.visibleNetworks} sichtbar)"
@@ -268,6 +285,7 @@ class WifiNavService : Service() {
             receiverRegistered = false
         }
         mock.disable()
+        _manual.value = null
         wakeLock?.let { if (it.isHeld) it.release() }
         _state.update { it.copy(running = false, mockActive = false) }
         super.onDestroy()
@@ -285,6 +303,21 @@ class WifiNavService : Service() {
 
         private val _state = MutableStateFlow(NavState())
         val state: StateFlow<NavState> = _state.asStateFlow()
+
+        /** Manueller Test-Standort; überschreibt die WLAN-Schätzung, solange gesetzt. */
+        private val _manual = MutableStateFlow<ManualLocation?>(null)
+        val manual: StateFlow<ManualLocation?> = _manual.asStateFlow()
+
+        /** Setzt den Test-Standort und startet den Service bei Bedarf (Berechtigung muss vorliegen). */
+        fun setManualLocation(context: Context, loc: ManualLocation) {
+            _manual.value = loc
+            if (!_state.value.running) start(context)
+        }
+
+        /** Zurück zur WLAN-basierten Position. */
+        fun clearManualLocation() {
+            _manual.value = null
+        }
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

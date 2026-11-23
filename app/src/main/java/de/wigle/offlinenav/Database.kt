@@ -37,6 +37,13 @@ interface AccessPointDao {
     @Query("SELECT * FROM access_points WHERE bssid IN (:bssids)")
     suspend fun findByBssidsRaw(bssids: List<String>): List<AccessPointEntity>
 
+    /** Zufälliger AP (für Test-Standort). rowid-basiert statt ORDER BY RANDOM(), damit große DBs schnell bleiben. */
+    @Query(
+        "SELECT * FROM access_points WHERE id >= " +
+            "(ABS(RANDOM()) % (SELECT MAX(id) FROM access_points) + 1) ORDER BY id LIMIT 1"
+    )
+    suspend fun randomOrNull(): AccessPointEntity?
+
     @Query("DELETE FROM access_points")
     suspend fun clear()
 }

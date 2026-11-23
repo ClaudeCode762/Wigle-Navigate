@@ -167,6 +167,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelDownload() { downloadJob?.cancel() }
 
+    // ── Test-Standort ──
+    val manualStore = ManualLocationStore(app)
+
+    fun randomAccessPoint(onResult: (AccessPointEntity?) -> Unit) {
+        viewModelScope.launch { onResult(dao.randomOrNull()) }
+    }
+
     fun clearDatabase() {
         viewModelScope.launch {
             dao.clear()
@@ -233,7 +240,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun requiredPermissions(): Array<String> = buildList {
+internal fun requiredPermissions(): Array<String> = buildList {
     add(Manifest.permission.ACCESS_FINE_LOCATION)
     add(Manifest.permission.ACCESS_COARSE_LOCATION)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -252,6 +259,7 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
         TabRow(selectedTabIndex = tab) {
             Tab(selected = tab == 0, onClick = { vm.selectedTab.value = 0 }, text = { Text("Navigation") })
             Tab(selected = tab == 1, onClick = { vm.selectedTab.value = 1 }, text = { Text("WiGLE-Download") })
+            Tab(selected = tab == 2, onClick = { vm.selectedTab.value = 2 }, text = { Text("Test-Standort") })
         }
         if (imp.running) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -263,7 +271,8 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
         }
         when (tab) {
             0 -> MainScreen(vm)
-            else -> WigleDownloadScreen(vm)
+            1 -> WigleDownloadScreen(vm)
+            else -> ManualLocationScreen(vm)
         }
     }
 }
@@ -595,7 +604,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
+internal fun SectionCard(title: String, content: @Composable () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -606,7 +615,7 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun WarnCard(title: String, text: String, action: String, onClick: () -> Unit) {
+internal fun WarnCard(title: String, text: String, action: String, onClick: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(Modifier.padding(16.dp)) {
             Text(title, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onErrorContainer)
@@ -617,7 +626,7 @@ private fun WarnCard(title: String, text: String, action: String, onClick: () ->
 }
 
 @Composable
-private fun StatRow(label: String, value: String) {
+internal fun StatRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
         Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
@@ -651,7 +660,7 @@ private fun ApRow(ap: UsedAccessPoint) {
 
 // ───────────────────────────── Helpers ─────────────────────────────
 
-private fun openDeveloperOptions(ctx: Context) {
+internal fun openDeveloperOptions(ctx: Context) {
     try {
         ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (_: Exception) {
